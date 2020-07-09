@@ -250,7 +250,7 @@ class Template(list):
   # For a full tag syntax explanation, refer to the TAG regex in TemplateTag.
   TAG = re.compile("""
       (\[\w+                      # Tag start and alphanum tagname
-        (?:(?::[\w-]+)+)?           # 0+ indices, alphanum with dashes
+        (?:(?::[\w.-]+)+)?           # 0+ indices, alphanum with dashes
         (?:(?:\|[\w-]+              # 0+ functions, alphanum with dashes
           (?:\([^()]*?\))?            # closure parentheses and arguments
         )+)?                        # end of function block
@@ -721,7 +721,7 @@ class TemplateTag(object):
   TAG = re.compile("""
       \[                  # Tag starts with opening bracket
         (\w+)               # Capture tagname (1+ alphanum length)
-        ((?::[\w-]+)+)?     # Capture 0+ indices (1+ alphanum+dashes length)
+        ((?::[\w.-]+)+)?     # Capture 0+ indices (1+ alphanum+dashes length)
         ((?:\|[\w-]+        # Capture 0+ functions (1+ alphanum+dashes length)
           (?:\([^()]*?\))?    # Functions may be closures with arguments.
         )+)?                # // end of optional functions
@@ -924,4 +924,6 @@ TAG_FUNCTIONS = {
     'items': lambda d: list(d.items()),
     'values': lambda d: list(d.values()),
     'sorted': sorted,
-    'len': len}
+    'len': len,
+    'type': lambda x : type(x).__name__,
+    }

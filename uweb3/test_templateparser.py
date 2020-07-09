@@ -198,7 +198,7 @@ class TemplateTagIndexed(unittest.TestCase):
   def testTemplateIndexingCharacters(self):
     """[IndexedTag] Tags indexes may be made of word chars and dashes only"""
     good_chars = "aAzZ0123-_"
-    bad_chars = """ :~!@#$%^&*()+={}\|;':",./<>? """
+    bad_chars = """ :~!@#$%^&*()+={}\|;':",/<>? """
     for index in good_chars:
       tag = {index: 'SUCCESS'}
       template = '[tag:%s]' % index

@@ -971,6 +971,7 @@ class Record(BaseRecord):
     except cursor.OperationalError as err_obj:
       if err_obj[0] == 1054:
         raise BadFieldError(err_obj[1])
+      raise
 
   def _SaveForeign(self, cursor):
     """Recursively saves all nested Record instances."""
