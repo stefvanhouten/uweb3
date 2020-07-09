@@ -924,4 +924,6 @@ TAG_FUNCTIONS = {
     'items': lambda d: list(d.items()),
     'values': lambda d: list(d.values()),
     'sorted': sorted,
-    'len': len}
+    'len': len,
+    'type': lambda x : type(x).__name__,
+    }
