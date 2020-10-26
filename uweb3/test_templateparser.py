@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/python3
 """Tests for the templateparser module."""
 
 # Too many public methods
@@ -145,6 +145,11 @@ class TemplateTagBasic(unittest.TestCase):
     template = 'Template with an [undefined] tag.'
     self.assertEqual(self.tmpl(template).Parse(), template)
 
+  def testUnreplacedTag(self):
+    """[BasicTag] Access to private members is not allowed"""
+    template = 'Template with an [private.__class__] tag.'
+    self.assertEqual(self.tmpl(template).Parse(), template)
+
   def testBracketsInsideTag(self):
     """[BasicTag] Innermost bracket pair are the tag's delimiters"""
     template = 'Template tags may not contain [[spam][eggs]].'
@@ -196,9 +201,12 @@ class TemplateTagIndexed(unittest.TestCase):
     self.assertEqual(self.tmpl(template).Parse(tag=mapp), lookup_dict)
 
   def testTemplateIndexingCharacters(self):
-    """[IndexedTag] Tags indexes may be made of word chars and dashes only"""
-    good_chars = "aAzZ0123-_"
-    bad_chars = """ :~!@#$%^&*()+={}\|;':",/<>? """
+    """[IndexedTag] Tags indexes may be made of word chars and dashes only,
+    they should however not start and end with _ to avoid access to
+    private vars.
+    _ is allowed elsewhere in the string."""
+    good_chars = "aAzZ0123-"
+    bad_chars = """ :~!@#$%^&*()+={}\|;':",./<>? """
     for index in good_chars:
       tag = {index: 'SUCCESS'}
       template = '[tag:%s]' % index
@@ -207,6 +215,29 @@ class TemplateTagIndexed(unittest.TestCase):
       tag = {index: 'FAIL'}
       template = '[tag:%s]' % index
       self.assertEqual(self.tmpl(template).Parse(tag=tag), template)
+
+  def testTemplateUnderscoreCharacters(self):
+    """[IndexedTag] Tags indexes may be made of word chars and dashes only,
+    they should however not start and end with _ to avoid access to
+    private vars.
+    _ is allowed elsewhere in the string."""
+    # see if objects with underscores are reachable
+    tag = {'test_test': 'SUCCESS'}
+    template = '[tag:%s]' % 'test_test'
+    self.assertEqual(self.tmpl(template).Parse(tag=tag), 'SUCCESS')
+
+    tag = {'_test': 'SUCCESS'}
+    template = '[tag:%s]' % '_test'
+    self.assertEqual(self.tmpl(template).Parse(tag=tag), 'SUCCESS')
+
+    tag = {'test_': 'SUCCESS'}
+    template = '[tag:%s]' % 'test_'
+    self.assertEqual(self.tmpl(template).Parse(tag=tag), 'SUCCESS')
+
+    # check if private vars are impossible to reach.
+    tag = {'_test_': 'SUCCESS'}
+    template = '[tag:%s|raw]' % '_test_'
+    self.assertEqual(self.tmpl(template).Parse(tag=tag), repr(tag))
 
   def testTemplateMissingIndexes(self):
     """[IndexedTag] Tags with bad indexes will be returned verbatim"""
@@ -234,6 +265,18 @@ class TemplateTagFunctions(unittest.TestCase):
     self.parse = self.parser.ParseString
 
   def testBasicFunction(self):
+    """[TagFunctions] and html safe output"""
+    template = 'This function does [none].'
+    result = self.parse(template, none='"nothing"')
+    self.assertEqual(result, 'This function does &quot;nothing&quot;.')
+
+  def testBasicFunctionNumeric(self):
+    """[TagFunctions] and html safe output for non string outputs"""
+    template = '[tag]'
+    result = self.parse(template, tag=1)
+    self.assertEqual(result, '1')
+
+  def testBasicFunctionRaw(self):
     """[TagFunctions] Raw function does not affect output"""
     template = 'This function does [none|raw].'
     result = self.parse(template, none='"nothing"')
@@ -326,14 +369,14 @@ class TemplateTagFunctions(unittest.TestCase):
 
   def testTagFunctionItems(self):
     """[TagFunctions] The tag function 'items' is present and works"""
-    template = '[tag|items]'
+    template = '[tag|items|raw]'
     tag = {'ham': 'eggs'}
     result = "[('ham', 'eggs')]"
     self.assertEqual(result, self.parse(template, tag=tag))
 
   def testTagFunctionValues(self):
     """[TagFunctions] The tag function 'values' is present and works"""
-    template = '[tag|values]'
+    template = '[tag|values|raw]'
     self.assertEqual(self.parse(template, tag={'ham': 'eggs'}), "['eggs']")
 
   def testTagFunctionSorted(self):
@@ -383,6 +426,27 @@ class TemplateTagFunctionClosures(unittest.TestCase):
     result = self.parse(template, tag=self.tag)
     self.assertEqual(result, self.tag[:20])
 
+  def testMathClosureArgument(self):
+    """[TagClosures] Math tag-closure functions operate on their argument"""
+    template = '[tag|limit(5*4)]'
+    result = self.parse(template, tag=self.tag)
+    self.assertEqual(result, self.tag[:20])
+
+  def testFunctionClosureArgument(self):
+    """[TagClosures] tags that use function calls in their function input should
+    never be parsed"""
+    template = '[tag|limit(abs(-20))]'
+    result = self.parse(template, tag=self.tag)
+    self.assertEqual(result, template)
+
+  def testVariableClosureArgument(self):
+    """[TagClosures] tags that try to use vars in their function arguments
+    should never have access to the python scope."""
+    test = 20
+    template = '[tag|limit(test)]'
+    self.assertRaises(templateparser.TemplateSyntaxError,
+        self.parse, template, tag=self.tag)
+
   def testComplexClosureWithoutArguments(self):
     """[TagClosures] Complex tag closure-functions without arguments succeed"""
     template = '[tag|strlimit()]'
@@ -401,7 +465,7 @@ class TemplateTagFunctionClosures(unittest.TestCase):
 
   def testCharactersInClosureArguments(self):
     """[TagClosures] Arguments strings may contain specialchars"""
-    template = '[tag|strlimit(20, "`-=./<>?`!@#$%^&*_+[]\{}|;\':")]'
+    template = '[tag|strlimit(20, "`-=./<>?`!@#$%^&*_+[]\{}|;\':")|raw]'
     result = self.parser.ParseString(template, tag=self.tag)
     self.assertTrue(result.endswith('`-=./<>?`!@#$%^&*_+[]\{}|;\':'))
 
@@ -521,12 +585,27 @@ class TemplateConditionals(unittest.TestCase):
     self.assertFalse(self.parse(template, variable=12))
     self.assertTrue(self.parse(template, variable=5))
 
+  def testCompareMath(self):
+    """{{ if }} Basic math"""
+    template = '{{ if 5*5 == 25 }} foo {{ endif }}'
+    self.assertEqual(self.parse(template, variable=5).strip(), 'foo')
+
   def testTagIsInstance(self):
-    """{{ if }} Basic tag value comparison"""
+    """{{ if }} Tag value after python function comparison"""
     template = '{{ if isinstance([variable], int) }} ack {{ endif }}'
     self.assertFalse(self.parse(template, variable=[1]))
     self.assertFalse(self.parse(template, variable='number'))
     self.assertEqual(self.parse(template, variable=5), ' ack ')
+
+  def testComparePythonFunction(self):
+    """{{ if }} Tag value after python len comparison"""
+    template = '{{ if len([variable]) == 5 }} foo {{ endif }}'
+    self.assertEqual(self.parse(template, variable=[1,2,3,4,5]).strip(), 'foo')
+
+  def testCompareNotallowdPythonFunction(self):
+    """{{ if }} Tag value after python len comparison"""
+    template = '{{ if open([variable]) == 5 }} foo {{ endif }}'
+    self.assertRaises(templateparser.TemplateEvaluationError, self.parse, template)
 
   def testDefaultElse(self):
     """{{ if }} Else block will be parsed when `if` fails"""
@@ -689,7 +768,9 @@ class TemplateLoops(unittest.TestCase):
 class TemplateTagPresenceCheck(unittest.TestCase):
   """Test cases for the `ifpresent` TemplateParser construct."""
   def setUp(self):
-    self.parse = templateparser.Parser().ParseString
+    self.parser = templateparser.Parser()
+    self.parse = self.parser.ParseString
+    self.templatefilename = 'ifpresent.utp'
 
   def testBasicTagPresence(self):
     """{{ ifpresent }} runs the code block if the tag is present"""
@@ -700,6 +781,20 @@ class TemplateTagPresenceCheck(unittest.TestCase):
     """{{ ifpresent }} does not run the main block if the tag is missing"""
     template = '{{ ifpresent [tag] }} hello {{ endif }}'
     self.assertFalse(self.parse(template))
+
+  def testBasicTagNotPresence(self):
+    """{{ ifnotpresent }} runs the code block if the tag is present"""
+    template = '{{ ifnotpresent [tag] }} hello {{ endif }}'
+    self.assertEqual(self.parse(template, othertag='spam'), ' hello ')
+
+  def testNestedNotPresence(self):
+    """{{ ifnotpresent }} runs the code block if the tag is present"""
+    template = """{{ ifnotpresent [tag] }}
+      {{ ifnotpresent [nestedtag] }}
+        hello
+      {{ endif }}
+    {{ endif }}"""
+    self.assertEqual(self.parse(template, othertag='spam').strip(), 'hello')
 
   def testTagPresenceElse(self):
     """{{ ifpresent }} has a functioning `else` clause"""
@@ -733,6 +828,25 @@ class TemplateTagPresenceCheck(unittest.TestCase):
     """{{ ifpresent }} requires proper tags to be checked for presence"""
     template = '{{ ifpresent var }} {{ endif }}'
     self.assertRaises(templateparser.TemplateSyntaxError, self.parse, template)
+
+  def testMultiTagPresenceFile(self):
+    """{{ ifpresent }} checks if multiple runs on a file template containing an
+    Ifpresent block work"""
+
+    template = '{{ ifpresent [one] }} [one] {{ endif }}Blank'
+    with open(self.templatefilename, 'w') as templatefile:
+      templatefile.write(template)
+    self.assertEqual(self.parser.Parse(self.templatefilename), 'Blank')
+    #self.assertEqual(self.parser.Parse(self.templatefilename), 'Blank')
+    #self.assertEqual(self.parser.Parse(self.templatefilename, one=1), ' 1 Blank')
+
+  def tearDown(self):
+    for tmpfile in (self.templatefilename, ):
+      if os.path.exists(tmpfile):
+        if os.path.isdir(tmpfile):
+          os.rmdir(tmpfile)
+        else:
+          os.unlink(tmpfile)
 
 
 class TemplateStringRepresentations(unittest.TestCase):

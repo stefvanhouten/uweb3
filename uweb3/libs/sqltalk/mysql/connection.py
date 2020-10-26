@@ -3,8 +3,9 @@
 a MySQL database. From this connection, cursor objects can be created, which
 use the escaping and character encoding facilities offered by the connection.
 """
-__author__ = 'Elmer de Looff <elmer@underdark.nl>'
-__version__ = '0.16'
+__author__ = ('Elmer de Looff <elmer@underdark.nl>',
+              'Jan Klopper <jan@underdark.nl>')
+__version__ = '0.17'
 
 # Standard modules
 import pymysql
@@ -13,8 +14,8 @@ import threading
 import weakref
 
 # Application specific modules
-from . import constants
-from . import converters
+from pymysql import constants
+from pymysql import converters
 from . import cursor
 from .. import sqlresult
 
@@ -118,7 +119,7 @@ class Connection(pymysql.connections.Connection):
 
     encoders = {}
     converts = {}
-    conversions = converters.CONVERSIONS
+    conversions = converters.conversions
     self.string_decoder = _GetStringDecoder()
 
     # if use_unicode:
@@ -151,7 +152,6 @@ class Connection(pymysql.connections.Connection):
     # self.encoders[unicode] = self.unicode_literal = _GetUnicodeLiteral()
     self.converter = conversions
 
-    self.server_version = tuple(map(int, self.get_server_info().split('.')[:2]))
     if sql_mode:
       self.SetSqlMode(sql_mode)
 
@@ -159,11 +159,11 @@ class Connection(pymysql.connections.Connection):
 
     self.transactional = bool(self.server_capabilities &
                               constants.CLIENT.TRANSACTIONS)
-    self._autocommit = None
+    self.autocommit_mode = None
     if autocommit is not None:
-      self.autocommit = autocommit
+      self.autocommit_mode = autocommit
     else:
-      self.autocommit = not self.transactional
+      self.autocommit_mode = not self.transactional
 
   def __enter__(self):
     """Refreshes the connection and returns a cursor, starting a transaction."""
@@ -181,15 +181,17 @@ class Connection(pymysql.connections.Connection):
     self.ResetTransactionTimer()
     if exc_type:
       self.rollback()
-      self.logger.exception(
-          'The transaction was rolled back after an exception.\n'
-          'Server: %s\nQueries in transaction (last one triggered):\n\n%s',
-          self.get_host_info(),
-          '\n\n'.join(self.queries))
+      if self.debug:
+        self.logger.exception(
+            'The transaction was rolled back after an exception.\n'
+            'Server: %s\nQueries in transaction (last one triggered):\n\n%s',
+            self.get_host_info(),
+            '\n\n'.join(self.queries))
     else:
       self.commit()
-      self.logger.debug(
-          'Transaction committed (server: %r).', self.get_host_info())
+      if self.debug:
+        self.logger.debug(
+            'Transaction committed (server: %r).', self.get_host_info())
     self.lock.release()
 
   def CurrentDatabase(self):
@@ -200,11 +202,10 @@ class Connection(pymysql.connections.Connection):
     """Returns a SQL escaped field or table name."""
     if not field:
       return ''
-    elif isinstance(field, str):
+    if isinstance(field, str):
       fields = '.'.join('`%s`' % f.replace('`', '``') for f in field.split('.'))
       return fields.replace('`*`', '*')
-    else:
-      return map(self.EscapeField, field)
+    return map(self.EscapeField, field)
 
   def EscapeValues(self, obj):
     """Escapes any object passed in following the encoders dictionary.
@@ -212,6 +213,8 @@ class Connection(pymysql.connections.Connection):
     Sequences and mappings will only have their contents escaped. All strings
     will be encoded to the connection's character set.
     """
+    if isinstance(obj, tuple) or isinstance(obj, list):
+      return list(map(lambda x: self.escape(x, self.encoders), obj))
     return self.escape(obj, self.encoders)
 
   def Info(self):
@@ -225,15 +228,16 @@ class Connection(pymysql.connections.Connection):
             'charset': self.charset,
             'server': self.ServerInfo()}
 
-  def Query(self, query_string):
+  def Query(self, query_string, cur=None):
     self.counter_queries += 1
     if isinstance(query_string, str):
       query_string = query_string.encode(self.charset)
-    cur = cursor.Cursor(self)
+    if not cur:
+      cur = cursor.Cursor(self)
     cur.execute(query_string)
     stored_result = cur.fetchall()
     if stored_result:
-      fields = stored_result[0].keys()
+      fields = list(stored_result[0])
     else:
       fields = []
     return sqlresult.ResultSet(
@@ -250,16 +254,11 @@ class Connection(pymysql.connections.Connection):
 
   def SetSqlMode(self, sql_mode):
     """Set the connection sql_mode. See MySQL documentation for legal values."""
-    if self.server_version < (4, 1):
-      raise self.NotSupportedError('server is too old to set sql_mode')
     self.Query('SET SESSION sql_mode=%s' % self.EscapeValues(sql_mode))
 
   def ShowWarnings(self):
     """Return detailed information about warnings as a sequence of tuples of
-    (Level, Code, Message). This is only supported in MySQL-4.1 and up.
-    If your server is an earlier version, an empty sequence is returned."""
-    if self.server_version < (4, 1):
-      return ()
+    (Level, Code, Message)."""
     return self.Query('SHOW WARNINGS')
 
   def StartTransactionTimer(self, delay=60):
@@ -283,7 +282,7 @@ class Connection(pymysql.connections.Connection):
 
   def _GetAutocommitState(self):
     """This returns the current setting for autocommiting transactions."""
-    return self._autocommit
+    return self.autocommit_mode
 
   def _GetCharacterSet(self):
     """This configures the character set used by this connection.
@@ -296,9 +295,12 @@ class Connection(pymysql.connections.Connection):
     """This sets the autocommit mode on the connection.
 
     This is False by default if the database supports transactions."""
-    self.ping(state)
+    try:
+      self.ping(reconnect=True)
+    except:
+      self.connect(sock=None)
     super(Connection, self).autocommit(state)
-    self._autocommit = state
+    self.autocommit_mode = state
 
   def _SetCharacterSet(self, charset):
     """This sets the character set, refer to _GetCharacterSet for doc."""
@@ -306,13 +308,14 @@ class Connection(pymysql.connections.Connection):
       super(Connection, self).set_charset(charset)
       self._charset = charset
 
+
   # Error classes taken from PyMySQL
   Error = pymysql.Error
   InterfaceError = pymysql.InterfaceError
   DatabaseError = pymysql.DatabaseError
   DataError = pymysql.DataError
   OperationalError = pymysql.OperationalError
-  IntegrityError = pymysql.IntegrityError
+  IntegrityError = pymysql.err.IntegrityError
   InternalError = pymysql.InternalError
   ProgrammingError = pymysql.ProgrammingError
   NotSupportedError = pymysql.NotSupportedError

@@ -17,9 +17,10 @@ __version__ = '1.6'
 import os
 import re
 import urllib.parse as urlparse
-from .ext_lib.libs.safestring import *
+from .libs.safestring import *
 import hashlib
 import itertools
+import ast, math
 
 class Error(Exception):
   """Superclass used for inheritance and external exception handling."""
@@ -47,6 +48,10 @@ class TemplateSyntaxError(Error):
 
 class TemplateReadError(Error, IOError):
   """Template file could not be read or found."""
+
+
+class TemplateEvaluationError(Error):
+  """Template condition was not within allowed set of operators."""
 
 
 class LazyTagValueRetrieval(object):
@@ -99,6 +104,17 @@ class LazyTagValueRetrieval(object):
     """Returns a list with the values of the LazyTagValueRetrieval dict."""
     return list(self.itervalues())
 
+EVALWHITELIST = {
+        'functions': {"abs": abs, "complex": complex, "min": min, "max": max,
+                      "pow": pow, "round": round, "len": len, "type": type,
+                      "isinstance": isinstance,
+                      **{key: value for (key,value) in vars(math).items() if not key.startswith('__')}},
+        'operators': (ast.Module, ast.Expr, ast.Load, ast.Expression, ast.Add, ast.And,
+                      ast.Sub, ast.UnaryOp, ast.Num, ast.BinOp, ast.Mult, ast.Gt,
+                      ast.Div, ast.Pow, ast.BitOr, ast.BitAnd, ast.BitXor, ast.Lt,
+                      ast.USub, ast.UAdd, ast.FloorDiv, ast.Mod, ast.LShift,
+                      ast.RShift, ast.Invert, ast.Call, ast.Name, ast.Compare,
+                      ast.Eq, ast.NotEq, ast.Not, ast.Or, ast.BoolOp, ast.Str)}
 
 class Parser(dict):
   """A template parser that loads and caches templates and parses them by name.
@@ -139,14 +155,12 @@ class Parser(dict):
     super(Parser, self).__init__()
     self.template_dir = path
     self.noparse = noparse
-
-    self.messages = None
-    self.templates = None
-    self.storage = None
+    self.tags = {}
+    self.requesttags = {}
+    self.astvisitor = AstVisitor(EVALWHITELIST)
 
     for template in templates:
       self.AddTemplate(template)
-
 
   def __getitem__(self, template):
     """Retrieves a stored template by name.
@@ -167,7 +181,7 @@ class Parser(dict):
     """
     if template not in self:
       self.AddTemplate(template)
-    return super(Parser, self).__getitem__(template)
+    return super().__getitem__(template)
 
   def AddTemplate(self, location, name=None):
     """Reads the given `template` filename and adds it to the cache.
@@ -207,10 +221,10 @@ class Parser(dict):
     Returns:
       str: The template with relevant tags replaced by the replacement dict.
     """
-
-    replacements['messages'] = self.messages
-    replacements['storage'] = self.storage
-    replacements.update(self.templates)
+    if self.tags:
+      replacements.update(self.tags)
+    if self.requesttags:
+      replacements.update(self.requesttags)
     return self[template].Parse(**replacements)
 
   def ParseString(self, template, **replacements):
@@ -227,6 +241,10 @@ class Parser(dict):
     Returns:
       str: template with replaced tags.
     """
+    if self.tags:
+      replacements.update(self.tags)
+    if self.requesttags:
+      replacements.update(self.requesttags)
     return Template(template, parser=self).Parse(**replacements)
 
   @staticmethod
@@ -240,6 +258,53 @@ class Parser(dict):
         The function that should be used. Ideally this returns a string.
     """
     TAG_FUNCTIONS[name] = function
+
+  def RegisterTag(self, tag, value, persistent=False):
+    """Registers a `value`, allowing use in templates by `tag`.
+
+    Arguments:
+      @ tag: str
+        The name of the tag
+      @ value: str, or function
+        Value or function to be executed when replacing this tag
+      @ persistent: bool
+        will this tag be present for multiple requests?
+    """
+    if persistent:
+      storage = self.tags
+    else:
+      storage = self.requesttags
+    if ':' not in tag:
+      storage[tag] = value
+      return
+    tag = TemplateTag.FromString('[%s]' % tag)
+    # if we are dealing with a tag consisting of multiple path parts, lets reconstruct the path
+    obj = storage
+    prevnode = tag.name
+    d = storage
+    for node in tag.indices:
+      try:
+        node = int(node)
+        subtype = SparseList()
+      except ValueError:
+        subtype = {}
+
+      # add the new sublist to the path if not existant
+      if prevnode not in obj:
+        obj[prevnode] = subtype
+
+      obj = obj[prevnode]
+      prevnode = node
+    obj[node] = value
+
+  @classmethod
+  def JITTag(cls, function):
+    return JITTag(function)
+
+  def ClearRequestTags(self):
+    """Resets the non persistent tags to None, is to be called after each
+    completed request"""
+    self.requesttags = {}
 
   TemplateReadError = TemplateReadError
 
@@ -267,7 +332,7 @@ class Template(list):
         An optional parser instance that is necessary to enable support for
         adding files to the current template. This is used by {{ inline }}.
     """
-    super(Template, self).__init__()
+    super().__init__()
     self.parser = parser
     self.scopes = [self]
     self.AddString(raw_template)
@@ -329,7 +394,7 @@ class Template(list):
       raise TemplateSyntaxError('Template left %d open scopes.' % scope_diff)
 
   def Parse(self, returnRawTemplate=False, **kwds):
-    """Returns the parsed template as SafeString.
+    """Returns the parsed template as HTMLsafestring.
 
     The template is parsed by parsing each of its members and combining that.
     """
@@ -341,9 +406,9 @@ class Template(list):
       return raw
 
     if self.parser and self.parser.noparse:
-      #Hash the page so that we can compare on the frontend if the html has changed
+      # Hash the page so that we can compare on the frontend if the html has changed
       htmlsafe.page_hash = hashlib.md5(HTMLsafestring(self).encode()).hexdigest()
-      #Hashes the page and the content so we can know if we need to refresh the page on the frontend
+      # Hashes the page and the content so we can know if we need to refresh the page on the frontend
       htmlsafe.tags = {}
       for tag in self:
         if isinstance(tag, TemplateConditional):
@@ -391,9 +456,6 @@ class Template(list):
   # Template syntax constructs
   #
 
-  def _TemplateConstructXsrf(self, value):
-    self.AddString('<input type="hidden" value="{}" name="xsrf" />'.format(value))
-
   def _TemplateConstructInline(self, name):
     """Processing for {{ inline }} template syntax."""
     self.AddFile(name)
@@ -408,15 +470,18 @@ class Template(list):
 
   def _TemplateConstructIf(self, *nodes):
     """Processing for {{ if }} template syntax."""
-    self._StartScope(TemplateConditional(' '.join(nodes)))
+    self._StartScope(TemplateConditional(' '.join(nodes),
+        self.parser.astvisitor if self.parser else AstVisitor(EVALWHITELIST)))
 
   def _TemplateConstructIfpresent(self, *nodes):
     """Processing for {{ ifpresent }} template syntax."""
-    self._StartScope(TemplateConditionalPresence(' '.join(nodes)))
+    self._StartScope(TemplateConditionalPresence(' '.join(nodes),
+        self.parser.astvisitor if self.parser else AstVisitor(EVALWHITELIST)))
 
   def _TemplateConstructIfnotpresent(self, *nodes):
     """Processing for {{ ifnotpresent }} template syntax."""
-    self._StartScope(TemplateConditionalPresence(' '.join(nodes), checking_presence=True))
+    self._StartScope(TemplateConditionalNotPresence(' '.join(nodes),
+        self.parser.astvisitor if self.parser else AstVisitor(EVALWHITELIST)))
 
   def _TemplateConstructElif(self, *nodes):
     """Processing for {{ elif }} template syntax."""
@@ -482,7 +547,8 @@ class FileTemplate(Template):
     try:
       self._file_name = os.path.abspath(template_path)
       self._file_mtime = os.path.getmtime(self._file_name)
-      raw_template = open(self._file_name).read()
+      with open(self._file_name) as templatefile:
+        raw_template = templatefile.read()
       super(FileTemplate, self).__init__(raw_template, parser=parser)
     except (IOError, OSError):
       raise TemplateReadError('Cannot open: %r' % template_path)
@@ -493,13 +559,12 @@ class FileTemplate(Template):
     The template is parsed by parsing each of its members and combining that.
     """
     self.ReloadIfModified()
-    result = super(FileTemplate, self).Parse(**kwds)
+    result = super().Parse(**kwds)
     if self.parser and self.parser.noparse:
-      return {'template': self._file_name.rsplit('/')[-1],
+      return {'template': self._templatepath[len(self.parser.template_dir):],
               'replacements': result.tags,
               'content_hash':result.content_hash,
-              'page_hash': result.page_hash
-              }
+              'page_hash': result.page_hash}
     return result
 
   def ReloadIfModified(self):
@@ -515,7 +580,8 @@ class FileTemplate(Template):
     try:
       mtime = os.path.getmtime(self._file_name)
       if mtime > self._file_mtime:
-        template = open(self._file_name).read()
+        with open(self._file_name) as templatefile:
+          template = templatefile.read()
         del self[:]
         self.scopes = [self]
         self.AddString(template)
@@ -528,11 +594,11 @@ class FileTemplate(Template):
 
 class TemplateConditional(object):
   """A template construct to control flow based on the value of a tag."""
-  def __init__(self, expr, checking_presence=True):
-    self.checking_presence = checking_presence
+  def __init__(self, expr, astvisitor):
     self.branches = []
     self.default = None
     self.NewBranch(expr)
+    self.astvisitor = astvisitor
 
   def __repr__(self):
     repr_branches = []
@@ -584,9 +650,8 @@ class TemplateConditional(object):
       raise TemplateSyntaxError('Only one {{ else }} clause is allowed.')
     self.default = []
 
-  @staticmethod
-  def Expression(expr, **kwds):
-    """Returns the eval()'ed result of a tag expression."""
+  def Expression(self, expr, **kwds):
+    """Returns the evaluated result of a tag expression."""
     nodes = []
     local_vars = LazyTagValueRetrieval(kwds)
     for num, node in enumerate(expr):
@@ -597,8 +662,7 @@ class TemplateConditional(object):
       else:
         nodes.append(node)
     try:
-      #XXX(Elmer): This uses eval, it's so much easier than lexing and parsing
-      return eval(''.join(nodes), None, local_vars)
+      return LimitedEval(''.join(nodes), self.astvisitor, local_vars)
     except NameError as error:
       raise TemplateNameError(str(error).capitalize() + '. Try it as tagname?')
 
@@ -621,14 +685,11 @@ class TemplateConditional(object):
     `else` branch exists '' is returned.
     """
     for expr, branch in self.branches:
-      if type(self) == TemplateConditionalPresence:
-        kwds['checking_presence'] = True
       if self.Expression(expr, **kwds):
         return ''.join(part.Parse(**kwds) for part in branch)
     if self.default:
       return ''.join(part.Parse(**kwds) for part in self.default)
     return ''
-
 
 
 class TemplateConditionalPresence(TemplateConditional):
@@ -640,17 +701,28 @@ class TemplateConditionalPresence(TemplateConditional):
     try:
       for tag in tags:
         tag.GetValue(kwds)
-      if kwds.get('checking_presence'):
-        return True
-      return False
-    except (TemplateKeyError, TemplateNameError):
-      if kwds.get('checking_presence'):
-        return False
       return True
+    except (TemplateKeyError, TemplateNameError):
+      return False
 
   def NewBranch(self, tags):
     """Begins a new branch based on the given tags."""
-    self.branches.append((map(TemplateTag.FromString, tags.split()), []))
+    self.branches.append((list(map(TemplateTag.FromString, tags.split())), []))
+
+
+class TemplateConditionalNotPresence(TemplateConditionalPresence):
+  """A template construct to safely check for the presence of tags."""
+
+  @staticmethod
+  def Expression(tags, **kwds):
+    """Checks the presence of all tags named on the branch."""
+    try:
+      for tag in tags:
+        tag.GetValue(kwds)
+      return False
+    except (TemplateKeyError, TemplateNameError):
+      return True
+
 
 class TemplateLoop(list):
   """Template loops are used to repeat a portion of template multiple times.
@@ -729,6 +801,7 @@ class TemplateTag(object):
       re.VERBOSE)
   FUNC_FINDER = re.compile('\|([\w-]+(?:\([^()]*?\))?)')
   FUNC_CLOSURE = re.compile('(\w+)\((.*)\)')
+  ALLOWPRIVATE = False # will we allow access to private members for object lookup
 
   def __init__(self, name, indices=(), functions=()):
     """Initializes a TemplateTag instant.
@@ -742,9 +815,8 @@ class TemplateTag(object):
         Names of template functions that should be applied to the value.
     """
     self.name = name
-    self.indices = indices
+    self.indices = indices if self.ALLOWPRIVATE else list(index for index in indices if not index.startswith('_') or not index.endswith('_'))
     self.functions = functions
-
 
   def __repr__(self):
     return '%s(%r)' % (type(self).__name__, str(self))
@@ -795,6 +867,8 @@ class TemplateTag(object):
       value = replacements[self.name]
       for index in self.indices:
         value = self._GetIndex(value, index)
+      if isinstance(value, JITTag):
+        return value()
       return value
     except KeyError:
       raise TemplateNameError('No replacement with name %r' % self.name)
@@ -807,7 +881,9 @@ class TemplateTag(object):
         return TAG_FUNCTIONS[func](value)
       func, args = closure.groups()
       #XXX(Elmer): This uses eval, it's so much easier than lexing and parsing
-      args = eval(args + ',') if args.strip() else ()
+      # the regex leading up to this point make sure no function calls end up in
+      # here, nor variables, Math might show up though
+      args = eval(args + ',', {'__builtins__': {}}, {}) if args.strip() else ()
       return TAG_FUNCTIONS[func](*args)(value)
     except SyntaxError:
       raise TemplateSyntaxError('Invalid argument syntax: %r' % args)
@@ -817,6 +893,9 @@ class TemplateTag(object):
     except KeyError as err_obj:
       raise TemplateNameError(
           'Unknown template tag function %r' % err_obj.args[0])
+    except NameError as err_obj:
+      raise TemplateSyntaxError(
+          'Access to scope outside of parser variables is not allowed: %r' % err_obj.args[0])
 
   def Parse(self, **kwds):
     """Returns the parsed string of the tag, using given replacements.
@@ -842,14 +921,13 @@ class TemplateTag(object):
     except (TemplateKeyError, TemplateNameError):
       # On any failure to get the given index, return the unmodified tag.
       return str(self)
-    # Process functions, or apply default if value is not HTMLsafestring
+    # Process functions, or apply default if value is not Basesafestring
     if self.functions:
       for func in self.functions:
         value = self.ApplyFunction(func, value)
-    else:
-      if not isinstance(value, Basesafestring):
-        value = TAG_FUNCTIONS['default'](value)
-    return str(value)
+    if not isinstance(value, Basesafestring):
+      value = TAG_FUNCTIONS['default'](value)
+    return value
 
   def Iterator(self, **kwds):
     """Parses the tag for iteration purposes.
@@ -866,7 +944,6 @@ class TemplateTag(object):
       value = TAG_FUNCTIONS[func](value)
     return iter(value)
 
-
   @staticmethod
   def _GetIndex(haystack, needle):
     """Returns the `needle` from the `haystack` by index, key or attribute name.
@@ -882,7 +959,7 @@ class TemplateTag(object):
 
     Returns:
       obj: the object existing on `needle` in `haystack`.
-      """
+    """
     try:
       if needle.isdigit():
         try:
@@ -905,7 +982,7 @@ class TemplateTag(object):
 class TemplateText(str):
   """A raw piece of template text, upon which no replacements will be done."""
   def __new__(cls, string):
-    return super(TemplateText, cls).__new__(cls, string)
+    return super().__new__(cls, string)
 
   def __repr__(self):
     """Returns the object representation of the TemplateText."""
@@ -916,11 +993,72 @@ class TemplateText(str):
     return str(self)
 
 
+class JITTag(object):
+  """This is a template Tag which is only evaulated on replacement.
+  It is usefull for situations where not all all of this functions input vars
+  are available just yet.
+  """
+
+  def __init__(self, function):
+    """Stores the function for later use"""
+    self.wrapped = function
+    self.result = None # cache for results
+    self.called = False # keep score of result cache usage, None and False might be correct results in the cache
+
+  def __call__(self):
+    """Returns the output of the earlier wrapped function"""
+    if not self.called:
+      self.result = self.wrapped()
+    self.called = True
+    return self.result
+
+
+class SparseList(list):
+  """A spare list implementation to allow us to set the nth item on a list"""
+  def __setitem__(self, index, value):
+    missing = index - len(self) + 1
+    if missing > 0:
+      self.extend([None] * missing)
+    super().__setitem__(index, value)
+
+  def __getitem__(self, index):
+    """Return the value at the index, and None of that index was not available
+    instead of raisig IndexError
+    """
+    try:
+      return super().__getitem__(index)
+    except IndexError:
+      return None
+
+
+class AstVisitor(ast.NodeVisitor):
+  def __init__(self, whitelists):
+    self.whitelists = whitelists
+
+  def visit(self, node):
+    if not isinstance(node, self.whitelists['operators']):
+      raise TemplateEvaluationError('`%s` is not an allowed operation' % node)
+    return super().visit(node)
+
+  def visit_Call(self, call):
+    """Filter calls"""
+    if call.func.id not in self.whitelists['functions']:
+      raise TemplateEvaluationError('`%s` is not an allowed function call' % call.func.id)
+
+def LimitedEval(expr, astvisitor, evallocals = {}):
+  tree = ast.parse(expr, mode='eval')
+  astvisitor.visit(tree)
+  return eval(compile(tree, "<string>", "eval"),
+      astvisitor.whitelists['functions'],
+      evallocals)
+
+
 TAG_FUNCTIONS = {
     'default': lambda d: HTMLsafestring('') + d,
     'html': lambda d: HTMLsafestring('') + d,
-    'raw': lambda x: x,
-    'url': lambda d: URLqueryargumentsafestring(d, unsafe=True),
+    'raw': lambda d: Unsafestring(d),
+    'url': lambda d: HTMLsafestring(URLqueryargumentsafestring(d, unsafe=True)),
+    'type': type,
     'items': lambda d: list(d.items()),
     'values': lambda d: list(d.values()),
     'sorted': sorted,

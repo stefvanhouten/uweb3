@@ -10,11 +10,11 @@ REQUIREMENTS = [
   'python-magic',
   'pytz',
   'simplejson',
-  'sqlalchemy',
-  'bcrypt',
-  'werkzeug',
-  'mysqlclient',
+  'bcrypt'
 ]
+
+#  'sqlalchemy',
+#  'werkzeug',
 
 def description():
   with open(os.path.join(os.path.dirname(__file__), 'README.md')) as r_file:
@@ -31,8 +31,8 @@ setup(
     name='uWeb3 test',
     version=version(),
     description='uWeb, python3, uswgi compatible micro web platform',
-    long_description=description(),
-    long_description_content_type='text/markdown',
+    long_description_file = 'README.md',
+    long_description_content_type = 'text/markdown',
     license='ISC',
     classifiers=[
         'Development Status :: 3 - Alpha',

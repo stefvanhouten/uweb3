@@ -20,24 +20,30 @@ Additions of unsafe types to a safe type automatically escape up to the safe
 type. Handy escape() functions are present to do manual escaping if required.
 """
 
-#TODO: logger geen enters
-#bash injection
-#mysql escaping
+#TODO: logger, dont output Enters
+# bash injection
+# mysql escaping
 __author__ = 'Jan Klopper (jan@underdark.nl)'
 __version__ = 0.1
 
 import html
+from json import JSONEncoder
 import json
 import urllib.parse as urlparse
 import re
-from ast import literal_eval
-from sqlalchemy import text
+
+# json encoder modules
+import datetime
+import uuid
+from uweb3 import model
+
 
 class Basesafestring(str):
   """Base safe string class
   This does not signal any safety against injection itself, use the child
-  classes instead!"""
-  ""
+  classes instead!
+  """
+
   def __add__(self, other):
     """Adds a second string to this string, upgrading it in the process"""
     data = ''.join(( # do not use the __add__ since that creates a loop
@@ -50,11 +56,10 @@ class Basesafestring(str):
     the current object"""
     if type(other) == self.__class__: #same type, easy, lets add
       return other
-    elif isinstance(other, Basesafestring): # lets unescape the other 'safe' type,
+    if isinstance(other, Basesafestring): # lets unescape the other 'safe' type,
       otherdata = other.unescape(other) # its escaping is not needed for his context
       return self.escape(otherdata) # escape it using our context
-    else:
-      return self.escape(str(other)) # escape it using our context
+    return self.escape(str(other)) # escape it using our context
 
   def __new__(cls, data, **kwargs):
     return super().__new__(cls,
@@ -112,21 +117,15 @@ class SQLSAFE(Basesafestring):
   PLACEHOLDERS_REGEX = re.compile(r"""\?+""")
   QUOTES_REGEX = re.compile(r"""([\"'])(?:(?=(\\?))\2.)*?\1""", re.DOTALL)
 
-  def __new__(cls, data, values=(), *args, **kwargs):
-    return super().__new__(cls,
-        cls.escape(cls, str(data), values) if 'unsafe' in kwargs else data)
-
   def __upgrade__(self, other):
-      """Upgrade a given object to be as safe, and in the same safety context as
-      the current object"""
-      if type(other) == self.__class__: #same type, easy, lets add
-        return other
-      elif isinstance(other, Basesafestring): # lets unescape the other 'safe' type,
-        otherdata = other.unescape(other) # its escaping is not needed for his context
-        return self.sanitize(otherdata) # escape it using our context
-      else:
-        other = " " + other
-        return self.sanitize(other, with_quotes=False)
+    """Upgrade a given object to be as safe, and in the same safety context as
+    the current object
+    """
+    if type(other) == self.__class__: #same type, easy, lets add
+      return other
+    elif isinstance(other, Basesafestring): # lets unescape the other 'safe' type,
+      return self.sanitize(other.unescape(other)) # escape it using our context
+    return self.sanitize(" " + other, with_quotes=False)
 
   @classmethod
   def sanitize(cls, value, with_quotes=True):
@@ -178,9 +177,18 @@ class SQLSAFE(Basesafestring):
 
 
 # what follows are the actual useable classes that are safe in specific contexts
+class Unsafestring(Basesafestring):
+  """This class removes any escaping done"""
+
+  def escape(self, data):
+    return data
+
+  def unescape(self, data):
+    return data
+
+
 class HTMLsafestring(Basesafestring):
   """This class signals that the content is HTML safe"""
-
 
   def escape(self, data):
     return html.escape(data)
@@ -194,18 +202,44 @@ class JSONsafestring(Basesafestring):
 
   Most of this will be handled by just feeding regular python objects into
   json.dumps, but for some outputs this might be handy. Eg, when outputting
-  partial json into dynamic generated javascript files"""
+  partial json into dynamic generated javascript files
+  """
+
+  def __new__(cls, data, **kwargs):
+    if isinstance(data, str):
+      data = cls.escape(cls, str(data)) if 'unsafe' in kwargs else data
+    else:
+      data = json.dumps(data, cls=JsonEncoder)
+    return super().__new__(cls, data)
 
   def escape(self, data):
-    if not isinstance(data, str):
-      raise TypeError
-    return json.dumps(data)
+    return json.dumps(data, cls=JsonEncoder)
 
   def unescape(self, data):
     if not isinstance(data, str):
       raise TypeError
-    data = json.loads(data)
-    return data
+    return json.loads(data)
+
+class JsonEncoder(json.JSONEncoder):
+  def default (self, o):
+    if isinstance(o, datetime.datetime):
+      return o.strftime('%F %T')
+    if isinstance(o, datetime.date):
+      return o.strftime('%F')
+    if isinstance(o, datetime.time):
+      return o.strftime('%T')
+    if isinstance(o, uuid.UUID):
+      return str(o)
+    if hasattr(o, "__json__"):
+      return str(o.__json__())
+    if hasattr(o, "__html__"):
+      return str(o.__html__())
+    if hasattr(o, "__dict__"):
+      return o.__dict__
+    try:
+      return super().default(o)
+    except TypeError:
+      return str(o)
 
 
 class URLqueryargumentsafestring(Basesafestring):
@@ -222,7 +256,8 @@ class URLqueryargumentsafestring(Basesafestring):
 
 class URLsafestring(Basesafestring):
   """This class signals that the content is URL safe, for use in http headers
-  like redirects, but also calls to wget or the like"""
+  like redirects, but also calls to wget or the like
+  """
 
   def escape(self, data):
     """Drops everything that does not fit in a url
@@ -246,8 +281,9 @@ class URLsafestring(Basesafestring):
 class EmailAddresssafestring(Basesafestring):
   """This class signals that the content is safe Email address
 
-  ITs usefull when sending out emails or constructing email headers
-  Email Header injection is subverted."""
+  Its usefull when sending out emails or constructing email headers
+  Email Header injection is subverted.
+  """
 
   def escape(self, data):
     """Drops everything that does not fit in an email address"""

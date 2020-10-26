@@ -1,29 +1,27 @@
-#!/usr/bin/python2.5
+#!/usr/bin/python3
 """This module implements the Connection class, which sets up a connection to
 an SQLite database. From this connection, cursor objects can be created, which
 use the escaping and character encoding facilities offered by the connection.
 """
-from __future__ import with_statement
-
 __author__ = 'Elmer de Looff <elmer@underdark.nl>'
 __version__ = '0.3'
 
 # Standard modules
-import _sqlite3
+import sqlite3
 import logging
 import os
-import Queue
+import queue
 import threading
 
 # Application specific modules
-import converters
-import cursor
+from . import converters
+from . import cursor
 
 COMMIT = '----COMMIT'
 ROLLBACK = '----ROLLBACK'
 NAMED_TYPE_SELECT = 'SELECT `name` FROM `sqlite_master` where `type`=?'
 
-class Connection(_sqlite3.Connection):
+class Connection(sqlite3.Connection):
   def __init__(self, *args, **kwds):
     db_name = os.path.splitext(os.path.split(args[0])[1])[0]
     self.logger = logging.getLogger('sqlite_%s' % db_name)
@@ -33,7 +31,7 @@ class Connection(_sqlite3.Connection):
       self.logger.setLevel(logging.WARNING)
     if kwds.pop('disable_log', False):
       self.logger.disable_logger = True
-    _sqlite3.Connection.__init__(self, *args, **kwds)
+    sqlite3.Connection.__init__(self, *args, **kwds)
 
   def __enter__(self):
     """Starts a transaction."""
@@ -50,21 +48,21 @@ class Connection(_sqlite3.Connection):
       self.logger.debug('Transaction committed.')
 
   def commit(self):
-    _sqlite3.Connection.commit(self)
-
-  def execute(self, query, args=()):
-    return _sqlite3.Connection.execute(self, query, args)
-
-  def executemany(self, query, args=()):
-    return _sqlite3.Connection.executemany(self, query, args)
+    sqlite3.Connection.commit(self)
 
   def rollback(self):
-    _sqlite3.Connection.rollback(self)
+    sqlite3.Connection.rollback(self)
 
   @staticmethod
   def EscapeField(field):
     """Returns a SQL escaped field or table name."""
     return '.'.join('`%s`' % f.replace('`', '``') for f in field.split('.'))
+
+  def EscapeValues(self, obj):
+    """We do not escape here, we simple return the value and allow the query
+    engine to escape using parameters.
+    """
+    return obj
 
   def ShowTables(self):
     result = self.execute(NAMED_TYPE_SELECT, ('table',)).fetchall()
@@ -86,7 +84,7 @@ class ThreadedConnection(threading.Thread):
 
     self.sqlite_args = args
     self.sqlite_kwds = kwds
-    self.queries = Queue.Queue(1)
+    self.queries = queue.queue(1)
     self.transaction_lock = threading.RLock()
     self.daemon = True
     self.start()
@@ -111,13 +109,13 @@ class ThreadedConnection(threading.Thread):
 
   def execute(self, query, args=()):
     with self.transaction_lock:
-      response = Queue.Queue()
+      response = queue.queue()
       self.queries.put((query, args, response, False))
       return self._ProcessResponse(response)
 
   def executemany(self, query, args=()):
     with self.transaction_lock:
-      response = Queue.Queue()
+      response = queue.queue()
       self.queries.put((query, args, response, True))
       return self._ProcessResponse(response)
 
@@ -178,11 +176,11 @@ class SqliteResult(object):
 
 
 #FIXME(Elmer): This needs defining in one place, not in each and every file.
-DataError = _sqlite3.DataError
-DatabaseError = _sqlite3.DatabaseError
-Error = _sqlite3.Error
-IntegrityError = _sqlite3.IntegrityError
-InterfaceError = _sqlite3.InterfaceError
-InternalError = _sqlite3.InternalError
-NotSupportedError = _sqlite3.NotSupportedError
-OperationalError = _sqlite3.OperationalError
+DataError = sqlite3.DataError
+DatabaseError = sqlite3.DatabaseError
+Error = sqlite3.Error
+IntegrityError = sqlite3.IntegrityError
+InterfaceError = sqlite3.InterfaceError
+InternalError = sqlite3.InternalError
+NotSupportedError = sqlite3.NotSupportedError
+OperationalError = sqlite3.OperationalError
