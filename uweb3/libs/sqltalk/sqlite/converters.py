@@ -1,4 +1,4 @@
-import _sqlite3
+import sqlite3
 import datetime
 import pytz
 import time
@@ -100,8 +100,8 @@ def ConvertTimestamp(date_obj):
     return INTERPRET_AS_UTC(datetime.datetime(*time_tuple))
 
 
-_sqlite3.register_adapter(datetime.date, AdaptDate)
-_sqlite3.register_adapter(datetime.datetime, AdaptDatetime)
-_sqlite3.register_adapter(time.struct_time, AdaptTimeStruct)
-_sqlite3.register_converter('DATE', ConvertDate)
-_sqlite3.register_converter('TIMESTAMP', ConvertTimestamp)
+sqlite3.register_adapter(datetime.date, AdaptDate)
+sqlite3.register_adapter(datetime.datetime, AdaptDatetime)
+sqlite3.register_adapter(time.struct_time, AdaptTimeStruct)
+sqlite3.register_converter('DATE', ConvertDate)
+sqlite3.register_converter('TIMESTAMP', ConvertTimestamp)

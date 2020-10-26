@@ -1,29 +1,25 @@
-#!/usr/bin/python2.6
-"""uWeb3 request module."""
+#!/usr/bin/python3
+# -*- coding: utf-8 -*-
+"""µWeb3 request module."""
 
 # Standard modules
 import cgi
 import sys
 import urllib
+import io
 from cgi import parse_qs
-try:
-  # python 2
-  import cStringIO as stringIO
-  import Cookie as cookie
-except ImportError:
-  # python 3
-  import io as stringIO
-  import http.cookies as cookie
+import io as stringIO
+import http.cookies as cookie
 import re
 import json
+
 # uWeb modules
-from uweb3 import response
-from werkzeug.formparser import parse_form_data
-from werkzeug.datastructures import MultiDict
+from . import response
 
 
-class CookieToBigError(Exception):
+class CookieTooBigError(Exception):
   """Error class for cookie when size is bigger than 4096 bytes"""
+
 
 class Cookie(cookie.SimpleCookie):
   """Cookie class that uses the most specific value for a cookie name.
@@ -53,34 +49,6 @@ class Cookie(cookie.SimpleCookie):
       dict.__setitem__(self, key, morsel)
 
 
-class PostDictionary(MultiDict):
-  """ """
-  #TODO: Add basic uweb functions
-
-  def getfirst(self, key, default=None):
-    """Returns the first item out of the list from the given key
-
-    Arguments:
-      @ key: str
-      % default: any
-    """
-    items = dict(self.lists())
-    try:
-      return items[key][0]
-    except KeyError:
-      return default
-
-  def getlist(self, key):
-    """Returns a list with all values that were given for the requested key.
-
-    N.B. If the given key does not exist, an empty list is returned.
-    """
-    items = dict(self.lists())
-    try:
-      return items[key]
-    except KeyError:
-      return []
-
 class Request(object):
   def __init__(self, env, registry):
     self.env = env
@@ -92,30 +60,21 @@ class Request(object):
     self.method = self.env['REQUEST_METHOD']
     self.vars = {'cookie': dict((name, value.value) for name, value in
                                 Cookie(self.env.get('HTTP_COOKIE')).items()),
-                 'get': PostDictionary(cgi.parse_qs(self.env.get('QUERY_STRING'))),
-                 'post': PostDictionary(),
-                 'put': PostDictionary(),
-                 'delete': PostDictionary(),
-                 }
+                 'get': QueryArgsDict(cgi.parse_qs(self.env['QUERY_STRING']))}
     self.env['host'] = self.headers.get('Host', '')
-    if self.method == 'POST':
-      stream, form, files = parse_form_data(self.env)
+    if self.method in ('POST', 'PUT', 'DELETE'):
+      request_body_size = 0
+      try:
+        request_body_size = int(self.env.get('CONTENT_LENGTH', 0))
+      except Exception:
+        pass
+      request_payload = self.env['wsgi.input'].read(request_body_size)
+      self.input = request_payload
       if self.env['CONTENT_TYPE'] == 'application/json':
-        try:
-          request_body_size = int(self.env.get('CONTENT_LENGTH', 0))
-        except (ValueError):
-          request_body_size = 0
-        request_body = self.env['wsgi.input'].read(request_body_size)
-        data = json.loads(request_body)
-        self.vars['post'] = PostDictionary(MultiDict(data))
+        self.vars[self.method.lower()] = json.loads(request_payload)
       else:
-        self.vars['post'] = PostDictionary(form)
-        for f in files:
-          self.vars['post'][f] = files.get(f)
-    else:
-      if self.method in ('PUT', 'DELETE'):
-        stream, form, files = parse_form_data(self.env)
-        self.vars[self.method.lower()] = PostDictionary(form)
+        self.vars[self.method.lower()] = IndexedFieldStorage(stringIO.StringIO(request_payload.decode("utf-8")),
+             environ={'REQUEST_METHOD': 'POST'})
 
   @property
   def path(self):
@@ -179,7 +138,7 @@ class Request(object):
     """
     if isinstance(value, (str)):
       if len(value.encode('utf-8')) >= 4096:
-        raise CookieToBigError("Cookie is larger than 4096 bytes and wont be set")
+        raise CookieTooBigError("Cookie is larger than 4096 bytes and wont be set")
 
     new_cookie = Cookie({key: value})
     if 'max_age' in attrs:
@@ -238,38 +197,41 @@ class IndexedFieldStorage(cgi.FieldStorage):
     self.list = list(indexed.values()) + self.list
     self.skip_lines()
 
+  def __repr__(self):
+    return "{%s}" % ','.join("'%s': '%s'" % (k, v if len(v) > 1 else v[0]) for k, v in self.iteritems())
 
-class CustomByteLikeObject(object):
-  def __init__(self, data):
-    self.data = data
+  @property
+  def __dict__(self):
+    d = {}
+    for key, value in self.iteritems():
+      d[key] = value if len(value) > 1 else value[0]
+    return d
 
-  def read(self, length=None):
-    if length:
-      return self.data[0:length]
-    else:
-      return self.data
 
-  def readline(self, *args):
-    return self.data
+class QueryArgsDict(dict):
+  def getfirst(self, key, default=None):
+    """Returns the first value for the requested key, or a fallback value."""
+    try:
+      return self[key][0]
+    except KeyError:
+      return default
 
-def ParseForm(file_handle, environ, json=False):
-  """Returns an IndexedFieldStorage object from the POST data and environment.
+  def getlist(self, key):
+    """Returns a list with all values that were given for the requested key.
 
-  This small wrapper is necessary because cgi.FieldStorage assumes that the
-  provided file handles supports .readline() iteration. File handles as provided
-  by BaseHTTPServer do not support this, so we need to convert them to proper
-  stringIO objects first.
+    N.B. If the given key does not exist, an empty list is returned.
+    """
+    try:
+      return self[key]
+    except KeyError:
+      return []
+
+
+def return_real_remote_addr(env):
+  """Returns the remote ip-address,
+  if there is a proxy involved it will take the last IP addres from the HTTP_X_FORWARDED_FOR list
   """
-  #TODO see if we need to encode in utf8 or is ascii is fine based on the headers
-  # print(file_handle.read(int(environ['CONTENT_LENGTH'])).decode('ascii'))
-  # data = sys.stdin.read()
-  if json:
-    #We already decoded the JSON and turned into a urlquerystring
-    environ['CONTENT_TYPE'] = 'application/x-www-form-urlencoded'
-    files = CustomByteLikeObject(file_handle.encode())
-  else:
-    files = CustomByteLikeObject(file_handle.read(int(environ['CONTENT_LENGTH'])))
-
-  return IndexedFieldStorage(fp=files, environ=environ, keep_blank_values=1)
-
-
+  try:
+    return env['HTTP_X_FORWARDED_FOR'].split(',')[-1].strip()
+  except KeyError:
+    return env['REMOTE_ADDR']

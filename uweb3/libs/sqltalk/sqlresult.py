@@ -10,11 +10,11 @@ Error Classes:
   FieldError: Field- index or name does not exist.
   NotSupportedError: Operation is not supported
 """
-__author__ = 'Elmer de Looff <elmer@underdark.nl>'
-__version__ = '1.3'
+__author__ = ('Elmer de Looff <elmer@underdark.nl>',
+              'Jan Klopper <jan@underdark.nl>')
+__version__ = '1.4'
 
 # Standard modules
-import itertools
 import operator
 
 GET_FIELD_NAME = operator.itemgetter(0)
@@ -116,7 +116,7 @@ class ResultRow(object):
     return iter(self._values)
 
   def iteritems(self):
-    return itertools.izip(self._fields, self._values)
+    return zip(self._fields, self._values)
 
   def keys(self):
     return self._fields[:]
@@ -204,9 +204,8 @@ class ResultSet(object):
         Number of affected rows from this operation.
       % charset: str ~~ ''
         Character set used by the connection that executed this operation.
-      % fields: tuple of tuples of strings ~~ None
-        Description of fields involved in this operation. Tuples of strings as
-        per the Python DB API (v2).
+      % fields: tuple of strings ~~ None
+        Description of fields involved in this operation.
       % insertid: int ~~ 0
         Auto-increment ID that was generated upon the last insert.
       % query ~~ ''
@@ -222,11 +221,10 @@ class ResultSet(object):
 
     if result:
       self.fields = fields
-      self._fieldnames = fieldnames = map(GET_FIELD_NAME, fields)
-      self.result = [row_class(fieldnames, row) for row in result]
+      self.raw = result
+      self.result = [row_class(fields, row.values()) for row in result]
     else:
       self.fields = ()
-      self._fieldnames = []
       self.result = []
 
   def __eq__(self, other):
@@ -266,7 +264,7 @@ class ResultSet(object):
     except TypeError:
       # The item type is incorrect, try grabbing a column for this fieldname.
       try:
-        index = self._fieldnames.index(item)
+        index = self._fields.index(item)
         return tuple(row[index] for row in self.result)
       except ValueError:
         raise FieldError('Bad field name: %r.' %  item)
@@ -285,7 +283,7 @@ class ResultSet(object):
 
   def __repr__(self):
     """Returns a string representation of the ResultSet."""
-    return '%s instance: %d rows%s' % (
+    return '%s instance: %d row%s' % (
         self.__class__.__name__, len(self.result), 's'[len(self.result) == 1:])
 
   def FilterRowsByFields(self, *fields):
@@ -302,7 +300,7 @@ class ResultSet(object):
       ResultRow: Each ResultRow contains only the filtered fields.
     """
     try:
-      indices = tuple(self._fieldnames.index(field) for field in fields)
+      indices = tuple(self._fields.index(field) for field in fields)
     except ValueError:
       raise FieldError('Bad fieldnames in filter request.')
     for row in self:
@@ -310,7 +308,7 @@ class ResultSet(object):
 
   def PopField(self, field):
     try:
-      self._fieldnames.remove(field)
+      self._fields.remove(field)
     except ValueError:
       raise FieldError('Fieldname %r does not occur in the ResultSet.' % field)
     return [row.pop(field) for row in self]
@@ -321,4 +319,4 @@ class ResultSet(object):
   @property
   def fieldnames(self):
     """Returns a tuple of the fieldnames that are in this ResultSet."""
-    return tuple(self._fieldnames)
+    return tuple(self._fields)

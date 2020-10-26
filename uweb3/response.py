@@ -7,7 +7,10 @@ try:
 except ImportError:
   import http.client as httplib
 
+import json
+
 from collections import defaultdict
+from .libs.safestring import JSONsafestring
 
 class Response(object):
   """Defines a full HTTP response.
@@ -34,10 +37,12 @@ class Response(object):
         A dictionary with header names and their associated values.
     """
     self.charset = kwds.get('charset', 'utf8')
+    self.content = None
     self.text = content
     self.httpcode = httpcode
     self.headers = headers or {}
-    if ';' not in content_type:
+    if (content_type.startswith('text/') or
+        content_type.startswith('application/json')) and ';' not in content_type:
       content_type = '{!s}; charset={!s}'.format(content_type, self.charset)
     self.content_type = content_type
 
@@ -53,6 +58,11 @@ class Response(object):
       content_type = '{!s}; {!s}'.format(content_type, current.split(';', 1)[-1])
     self.headers['Content-Type'] = content_type
 
+  def clean_content_type(self):
+    if ';' not in self.headers['Content-Type']:
+      return self.headers['Content-Type']
+    return self.headers['Content-Type'].split(';')[0]
+
   # Get and set body text
   @property
   def text(self):
@@ -60,7 +70,7 @@ class Response(object):
 
   @text.setter
   def text(self, content):
-    self.content = str(content)
+    self.content = content
 
   # Retrieve a header list
   @property
@@ -94,11 +104,9 @@ class Redirect(Response):
   REDIRECT_PAGE = ('<!DOCTYPE html><html><head><title>Page moved</title></head>'
                    '<body>Page moved, please follow <a href="%s">this link</a>'
                    '</body></html>')
-  #TODO make sure we inject cookies set on the previous response by copying any Set-Cookie headers from them into these headers.
   def __init__(self, location, httpcode=307):
     super(Redirect, self).__init__(
         content=self.REDIRECT_PAGE % location,
         content_type='text/html',
         httpcode=httpcode,
         headers={'Location': location})
-

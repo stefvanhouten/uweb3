@@ -10,12 +10,13 @@ import sys
 import threading
 import time
 import hashlib
+import glob
 from base64 import b64encode
 from pymysql import Error as pymysqlerr
 
-import uweb3
-from uweb3.model import SecureCookie
 
+import uweb3
+from ..connections import ConnectionManager
 from .. import response, templateparser
 
 RFC_1123_DATE = '%a, %d %b %Y %T GMT'
@@ -141,7 +142,8 @@ class MimeTypeDict(dict):
     if kwargs:
       self.update(kwargs)
 
-class XSRF(object):
+
+class XSRFToken(object):
   def __init__(self, seed, remote_addr):
     self.seed = seed
     self.remote_addr = remote_addr
@@ -151,16 +153,13 @@ class XSRF(object):
     """Generate an XSRF token
 
     XSRF token is generated based on the unix timestamp from today,
-    a randomly generated seed and the IP addres from the user
+    a randomly generated seed and the IP addres from the request
     """
     hashed = (str(self.unix_today) + self.seed + self.remote_addr).encode('utf-8')
     h = hashlib.new('ripemd160')
     h.update(hashed)
     return h.hexdigest()
 
-  def is_valid(self, supplied_token):
-    token = self.generate_token()
-    return token != supplied_token
 
 class Base(object):
   # Constant for persistent storage accross requests. This will be accessible
@@ -168,41 +167,16 @@ class Base(object):
   PERSISTENT = CacheStorage()
   # Base paths for templates and public data. These are used in the PageMaker
   # classmethods that set up paths specific for that pagemaker.
-  PUBLIC_DIR = 'static'
   TEMPLATE_DIR = 'templates'
 
   def __init__(self):
-    self.storage = {}
-    self.messages = []
-    self.extended_templates = {}
     self.persistent = self.PERSISTENT
+    # clean up any request tags in the template parser
+    if '__parser' in self.persistent:
+      self.persistent.Get('__parser').ClearRequestTags()
 
-  def Flash(self, message):
-    """Appends message to list, list element is vailable in the template under keyword messages
-
-    Arguments:
-      @ message: str
-    Raises:
-      TypeError
-    """
-    if not isinstance(message, str):
-      raise TypeError("Message is of incorrect type, Should be string.")
-    self.messages.append(message)
-
-  def ExtendTemplate(self, title, template, **kwds):
-    """Extend the template on which this method is called.
-
-    Arguments:
-    @ title: str
-      Name of the variable that you can access the extended template at
-    @ template: str
-      Name of the template that you want to extend
-    % **kwds: kwds
-      The keywords that you want to pass to the template. Works the same as self.parser.Parse('template.html', var=value)
-    """
-    if self.extended_templates.get(title):
-      raise ValueError("There is already a template with this title")
-    self.extended_templates[title] = self.parser.Parse(template, **kwds)
+  def _PostInit(self):
+    pass
 
   @property
   def parser(self):
@@ -215,11 +189,7 @@ class Base(object):
     if '__parser' not in self.persistent:
       self.persistent.Set('__parser', templateparser.Parser(
           self.options.get('templates', {}).get('path', self.TEMPLATE_DIR)))
-    parser = self.persistent.Get('__parser')
-    parser.messages = self.messages
-    parser.templates = self.extended_templates
-    parser.storage = self.storage
-    return parser
+    return self.persistent.Get('__parser')
 
 
 class WebsocketPageMaker(Base):
@@ -238,21 +208,92 @@ class WebsocketPageMaker(Base):
     print(f"User connected with SocketID {sid}: ")
     self.req = env
 
+
+class XSRFMixin(object):
+  """Provides XSRF protection by enabling setting xsrf token cookies, checking
+  them and setting a flag based on their value
+
+  A seperate decorator can then be used to clear the POST/GET/PUT variables if
+  needed in specific pagemaker functions depending on that page's security
+  context.
+  """
+  XSRFCOOKIE = 'xsrf'
+  XSRF_seed = str(os.urandom(32))
+
+  def validatexsrf(self):
+    """Sets the invalid_xsrf_token flag to true or false"""
+    self.invalid_xsrf_token = False
+    if self.req.method != 'GET': # GET calls will be ignored, but will set a cookie
+      self.invalid_xsrf_token = True
+      try:
+        user_supplied_xsrf_token = getattr(self, self.req.method.lower()).getfirst(self.XSRFCOOKIE)
+        self.invalid_xsrf_token = (self.cookies.get(self.XSRFCOOKIE) != user_supplied_xsrf_token)
+      except Exception:
+        # any error in looking up the cookie of the supplied post vars will result in a invalid xsrf token flag
+        pass
+    # If no cookie is present, set it.
+    self._Set_XSRF_cookie()
+
+  def _Set_XSRF_cookie(self):
+    """This creates a new XSRF token for this client, which is IP bound, and
+    stores it in a cookie.
+    """
+    xsrf_cookie = self.cookies.get(self.XSRFCOOKIE, False)
+    if not xsrf_cookie:
+      xsrf_cookie = XSRFToken(self.XSRF_seed, self.req.env['REAL_REMOTE_ADDR']).generate_token()
+      self.req.AddCookie(self.XSRFCOOKIE, xsrf_cookie, path="/", httponly=True)
+    return xsrf_cookie
+
+  def XSRFInvalidToken(self):
+    """Returns an error message regarding an incorrect XSRF token."""
+    errorpage = templateparser.FileTemplate(os.path.join(
+        os.path.dirname(__file__), 'http_403.html'))
+    error = """Your browser did not send us the correct token, any token at all, or a timed out token.
+    Because of this we cannot allow you to perform this action at this time. Please refresh the previous page and try again."""
+
+    return uweb3.Response(content=errorpage.Parse(error=error),
+        httpcode=403, headers=self.req.response.headers)
+
+  def _Get_XSRF(self):
+    """Easy access to the XSRF token"""
+    try:
+      return self.cookies[self.XSRFCOOKIE]
+    except KeyError:
+      return self._Set_XSRF_cookie()
+
+
+class LoginMixin(object):
+  """This mixin provides a few methods that help with handling logins, sessions
+  and related database/cookie interaction"""
+
+  def _ReadSession(self):
+    return NotImplemented
+
+  @property
+  def user(self):
+    """Returns the current user"""
+    if not hasattr(self, '_user') or not self._user:
+      try:
+        self._user = self._ReadSession()
+      except ValueError:
+        self._user = False
+    return self._user
+
+
 class BasePageMaker(Base):
   """Provides the base pagemaker methods for all the html generators."""
   _registery = []
 
   # Default Static() handler cache durations, per MIMEtype, in days
-  CACHE_DURATION = MimeTypeDict({'text': 7, 'image': 30, 'application': 7})
+  PUBLIC_DIR = 'static'
+  CACHE_DURATION = MimeTypeDict({'text': 7, 'image': 30, 'application': 7,
+      'text/css': 7})
 
   def __init__(self,
               req,
               config=None,
-              secure_cookie_secret=None,
-              executing_path=None,
-              XSRF_seed=None):
+              executing_path=None):
     """sets up the template parser and database connections.
-    Handles setting the XSRF flag for each incoming request.
 
     Arguments:
       @ req: request.Request
@@ -260,110 +301,61 @@ class BasePageMaker(Base):
       % config: dict ~~ None
         Configuration for the pagemaker, with database connection information
         and other settings. This will be available through `self.options`.
-      % secure_cookie_secret: Randomly generated os.urandom(32) byte string
-        This is used as a secret for the SecureCookie class
       % executing_path: str/path
         This is the path to the uWeb3 routing file.
-      % XSRF_seed: Randomly generated os.urandom(32) byte string
-        This is used as a secret for the XSRF hash in the XSRF class.
     """
     super(BasePageMaker, self).__init__()
     self.__SetupPaths(executing_path)
     self.req = req
     self.cookies = req.vars['cookie']
     self.get = req.vars['get']
-    self.post = req.vars['post']
-    self.put = req.vars['put']
-    self.delete = req.vars['delete']
-    self.options = config or {}
-    self.secure_cookie_connection = (self.req, self.cookies, secure_cookie_secret)
-    self.set_invalid_xsrf_token_flag(XSRF_seed)
-
-  def set_invalid_xsrf_token_flag(self, XSRF_seed):
-    """Sets the invalid_xsrf_token flag to true or false"""
-    self.invalid_xsrf_token = False
-    if self.req.method != 'GET':
-      user_supplied_xsrf_token = getattr(self, self.req.method.lower()).get('xsrf')
-      xsrf = XSRF(XSRF_seed, self.req.env['REAL_REMOTE_ADDR'])
-      self.invalid_xsrf_token = xsrf.is_valid(user_supplied_xsrf_token)
-    #First we try to validate the token, then we check if the user has an xsrf cookie
-    self._Set_XSRF_cookie(XSRF_seed)
-
-
-  def _Set_XSRF_cookie(self, XSRF_seed):
-    """Checks if XSRF is enabled in the config and handles accordingly
-
-    If XSRF is enabled it will check if there is an XSRF cookie, if not create one.
-    If XSRF is disabled nothing will happen
-    """
-    if self.options.get('development'):
-      xsrf_enabled = self.options['development'].get('xsrf')
-      if xsrf_enabled == "True":
-        xsrf_cookie = self.cookies.get('xsrf')
-        if self.invalid_xsrf_token:
-          self.req.AddCookie("xsrf",  XSRF(XSRF_seed, self.req.env['REAL_REMOTE_ADDR']).generate_token())
-          return
-        if not xsrf_cookie:
-          self.req.AddCookie("xsrf",  XSRF(XSRF_seed, self.req.env['REAL_REMOTE_ADDR']).generate_token())
-          return
-
-  def _PostRequest(self, response):
-    if response.status == '500 Internal Server Error':
-      if not hasattr(self, 'connection_error'): #this is set when we try and create a connection but it failed
-        #TODO: This requires some testing
-        print("ATTEMPTING TO ROLLBACK DATABASE")
-        try:
-          with self.connection as cursor:
-            cursor.Execute("ROLLBACK")
-        except Exception:
-          if hasattr(self, 'connection'):
-            if self.connection.open:
-              self.connection.close()
-              self.persistent.Del("__mysql")
-        self.connection_error = False
-    return response
-
-  def XSRFInvalidToken(self, command):
-    """Returns an error message regarding an incorrect XSRF token."""
-    page_data = self.parser.Parse('403.html', error=command)
-    return uweb3.Response(content=page_data, httpcode=403, headers=self.req.response.headers)
+    self.post = req.vars['post'] if 'post' in req.vars else {}
+    self.put = req.vars['put'] if 'put' in req.vars else {}
+    self.delete = req.vars['delete'] if 'delete' in req.vars else {}
+    self.config = config or None
+    self.options = config.options if config else {}
+    self.debug = DebuggerMixin in self.__class__.__mro__
+    try:
+      self.connection = self.persistent.Get('connection')
+    except KeyError:
+      self.persistent.Set('connection', ConnectionManager(self.config, self.options, self.debug))
+      self.connection = self.persistent.Get('connection')
 
   @classmethod
-  def LoadModules(cls, default_routes='routes', excluded_files=('__init__', '.pyc')):
+  def LoadModules(cls, routes='routes/*.py'):
     """Loops over all .py files apart from some exceptions in target directory
     Looks for classes that contain pagemaker
 
     Arguments:
       % default_routes: str
-        Path to the directory where you want to store your routes. Defaults to routes.
-      % excluded_files: tuple(str)
-        Extension name of the files you want to exclude. Default excluded files are __init__ and .pyc.
+        Location to your route files. Defaults to routes/*.py
+        Supports glob style syntax, non recursive.
     """
     bases = []
-    routes = os.path.join(os.getcwd(), default_routes)
-    for path, dirnames, filenames in os.walk(routes):
-      for filename in filenames:
-        name, ext = os.path.splitext(filename)
-        if name not in excluded_files and ext not in excluded_files:
-          f = os.path.relpath(os.path.join(os.getcwd(), default_routes, filename[:-3])).replace('/', '.')
-          example_data = pyclbr.readmodule_ex(f)
-          for name, data in example_data.items():
-            if hasattr(data, 'super'):
-              if 'PageMaker' in data.super[0]:
-                module = __import__(f, fromlist=[name])
-                bases.append(getattr(module, name))
+    for file in glob.glob(routes):
+      module = os.path.relpath(os.path.join(os.getcwd(), file[:-3])).replace('/', '.')
+      classlist = pyclbr.readmodule_ex(module)
+      for name, data in classlist.items():
+        if hasattr(data, 'super'):
+          if 'PageMaker' in data.super[0]:
+            module = __import__(f, fromlist=[name])
+            bases.append(getattr(module, name))
     return bases
 
   def _PostInit(self):
     """Method that gets called for derived classes of BasePageMaker."""
+
+  def _ConnectionRollback(self):
+    """Roll back all connections, this method can be overwritten by the user"""
+    self.connection.Rollback()
 
   @classmethod
   def __SetupPaths(cls, executing_path):
     """This sets up the correct paths for the PageMaker subclasses.
 
     From the passed in `cls`, it retrieves the filename. Of that path, the
-    directory is used as the working directory. Then, the module constants
-    PUBLIC_DIR and TEMPLATE_DIR are used to define class constants from.
+    directory is used as the working directory. Then, the module constant
+    TEMPLATE_DIR is used to define class constants from.
     """
     # Unfortunately, mod_python does not always support retrieving the caller
     # filename using sys.modules. In those cases we need to query the stack.
@@ -387,6 +379,58 @@ class BasePageMaker(Base):
     cls.PUBLIC_DIR = os.path.join(cls_dir, cls.PUBLIC_DIR)
     cls.TEMPLATE_DIR = os.path.join(cls_dir, cls.TEMPLATE_DIR)
 
+  def Static(self, rel_path):
+    """Provides a handler for static content.
+
+    The requested `path` is truncated against a root (removing any uplevels),
+    and then added to the working dir + PUBLIC_DIR. If the request file exists,
+    then the requested file is retrieved, its mimetype guessed, and returned
+    to the client performing the request.
+
+    Should the requested file not exist, a 404 page is returned instead.
+
+    Arguments:
+      @ rel_path: str
+        The filename relative to the working directory of the webserver.
+
+    Returns:
+      Page: contains the content and mimetype of the requested file, or a 404
+            page if the file was not available on the local path.
+    """
+    rel_path = os.path.abspath(os.path.join(os.path.sep, rel_path))[1:]
+    abs_path = os.path.join(self.PUBLIC_DIR, rel_path)
+    try:
+      content_type, _encoding = mimetypes.guess_type(abs_path)
+      if not content_type:
+        content_type = 'text/plain'
+      binary = False
+      if not content_type.startswith('text/'):
+        binary = True
+      with open(abs_path, 'rb' if binary else 'r') as staticfile:
+        mtime = os.path.getmtime(abs_path)
+        length = os.path.getsize(abs_path)
+        cache_days = self.CACHE_DURATION.get(content_type, 0)
+        expires = datetime.datetime.utcnow() + datetime.timedelta(cache_days)
+        return response.Response(content=staticfile.read(),
+                        content_type=content_type,
+                        headers={'Expires': expires.strftime(RFC_1123_DATE),
+                                 'cache-control': 'max-age=%d' %
+                                    (cache_days*24*60*60),
+                                 'last-modified': time.ctime(mtime),
+                                 'content-length': length})
+    except IOError:
+      return self._StaticNotFound(rel_path)
+
+  def _StaticNotFound(self, _path):
+    message = 'This is not the path you\'re looking for. No such file %r' % (
+      self.req.env['PATH_INFO'])
+    return response.Response(message, content_type='text/plain', httpcode=404)
+
+  def _NotFound(self, _path):
+    message = 'This is not the path you\'re looking for. No such path %r' % (
+      self.req.env['PATH_INFO'])
+    return response.Response(message, content_type='text/html', httpcode=404)
+
   def InternalServerError(self, exc_type, exc_value, traceback):
     """Returns a plain text notification about an internal server error."""
     error = 'INTERNAL SERVER ERROR (HTTP 500) DURING PROCESSING OF %r' % (
@@ -401,25 +445,9 @@ class BasePageMaker(Base):
     """Raises `ReloadModules`, telling the Handler() to reload its pageclass."""
     raise ReloadModules('Reloading ... ')
 
-  def _GetXSRF(self):
-    if 'xsrf' in self.cookies:
-      return self.cookies['xsrf']
-    return None
-
-  def CommonBlocks(self, title, page_id=None, scripts=None):
-    """Returns a dictionary with the header and footer in it."""
-    if not page_id:
-      page_id = title.replace(' ', '_').lower()
-
-    return {'header': self.parser.Parse(
-                'header.html', title=title, page_id=page_id
-                ),
-            'footer': self.parser.Parse(
-                'footer.html', year=time.strftime('%Y'),
-                page_id=page_id, scripts=scripts
-                ),
-            'page_id': page_id,
-            }
+  def _PostRequest(self):
+    """Method that gets called after each request"""
+    self.connection.PostRequest()
 
 
 class DebuggerMixin(object):
@@ -429,8 +457,7 @@ class DebuggerMixin(object):
   lacks interactive functions.
   """
   CACHE_DURATION = MimeTypeDict({})
-  ERROR_TEMPLATE = templateparser.FileTemplate(os.path.join(
-      os.path.dirname(__file__), 'http_500.html'))
+  ERROR_TEMPLATE = 'http_500.html'
 
   def _ParseStackFrames(self, stack):
     """Generates list items for traceback information.
@@ -491,9 +518,12 @@ class DebuggerMixin(object):
         'error_for_error': False,
         'exc': {'type': exc_type, 'value': exc_value,
                 'traceback': self._ParseStackFrames(traceback)}}
+
+    error_template = templateparser.FileTemplate(os.path.join(
+      os.path.dirname(__file__), self.ERROR_TEMPLATE))
     try:
       return response.Response(
-          self.ERROR_TEMPLATE.Parse(**exception_data), httpcode=500)
+          error_template.Parse(**exception_data), httpcode=500)
     except Exception:
       exc_type, exc_value, traceback = sys.exc_info()
       self.req.registry.logger.critical(
@@ -504,134 +534,77 @@ class DebuggerMixin(object):
       exception_data['exc'] = {'type': exc_type, 'value': exc_value,
                                'traceback': self._ParseStackFrames(traceback)}
       return response.Response(
-          self.ERROR_TEMPLATE.Parse(**exception_data), httpcode=500)
-
-class MongoMixin(object):
-  """Adds MongoDB support to PageMaker."""
-  @property
-  def mongo(self):
-    """Returns a MongoDB database connection."""
-    if '__mongo' not in self.persistent:
-      import pymongo
-      mongo_config = self.options.get('mongo', {})
-      connection = pymongo.connection.Connection(
-          host=mongo_config.get('host'),
-          port=mongo_config.get('port'))
-      if 'database' in mongo_config:
-        self.persistent.Set('__mongo', connection[mongo_config['database']])
-      else:
-        self.persistent.Set('__mongo', connection)
-    return self.persistent.Get('__mongo')
+          error_template.Parse(**exception_data), httpcode=500)
 
 
-class SqlAlchemyMixin(object):
-  """Adds MysqlAlchemy connection to PageMaker."""
+class CSPMixin(object):
+  """Provides CSP header output.
 
-  @property
-  def engine(self):
-    if '__sql_alchemy' not in self.persistent:
-      from sqlalchemy import create_engine
-      mysql_config = self.options['mysql']
-      engine = create_engine('mysql://{username}:{password}@{host}/{database}'.format(
-          username=mysql_config.get('user'),
-          password=mysql_config.get('password'),
-          host=mysql_config.get('host', 'localhost'),
-          database=mysql_config.get('database')), pool_size=5, max_overflow=0)
-      self.persistent.Set('__sql_alchemy', engine)
-    return self.persistent.Get('__sql_alchemy')
-
-  @property
-  def session(self):
-    from sqlalchemy.orm import sessionmaker
-    Session = sessionmaker()
-    Session.configure(bind=self.engine, expire_on_commit=False)
-    return Session()
-
-class MysqlMixin(object):
-  """Adds MySQL support to PageMaker."""
-  @property
-  def connection(self):
-    """Returns a MySQL database connection."""
-    try:
-      if '__mysql' not in self.persistent:
-        from libs.sqltalk import mysql
-        mysql_config = self.options['mysql']
-        self.persistent.Set('__mysql', mysql.Connect(
-            host=mysql_config.get('host', 'localhost'),
-            user=mysql_config.get('user'),
-            passwd=mysql_config.get('password'),
-            db=mysql_config.get('database'),
-            charset=mysql_config.get('charset', 'utf8'),
-            debug=DebuggerMixin in self.__class__.__mro__))
-      return self.persistent.Get('__mysql')
-    except Exception as e:
-      self.connection_error = True
-      raise e
-
-
-
-class SqliteMixin(object):
-  """Adds SQLite support to PageMaker."""
-  @property
-  def connection(self):
-    """Returns an SQLite database connection."""
-    if '__sqlite' not in self.persistent:
-      from libs.sqltalk import sqlite
-      self.persistent.Set('__sqlite', sqlite.Connect(
-          self.options['sqlite']['database']))
-    return self.persistent.Get('__sqlite')
-
-class SmorgasbordMixin(object):
-  """Provides multiple-database connectivity.
-
-  This enables a developer to use a single 'connection' property (`bord`) which
-  can be used for regular relation database and MongoDB access. The caller will
-  be given the relation database connection, unless Smorgasbord is aware of
-  the caller's needs for another database connection.
+  https://content-security-policy.com/
   """
-  class Connections(dict):
-    """Connection autoloading class for Smorgasbord."""
-    def __init__(self, pagemaker):
-      super(SmorgasbordMixin.Connections, self).__init__()
-      self.pagemaker = pagemaker
+  _csp = {
+        "default-src": ("'none'",),
+        "object-src": ("'none'",),
+        "script-src":  ("'none'",),
+        "style-src":  ("'none'",),
+        "form-action":  ("'none'",),
+        "connect-src":  ("'none'",),
+        "img-src":  ("'none'",),
+        "font-src":  ("'none'",),
+        "frame-ancestors":  ("'none'",),
+        "base-uri": ("'none'",)
+  }
 
-    def __getitem__(self, key):
-      """Returns the requested database connection type.
+  def _SetCsp(self, resourcetype="default-src", urls=("'self'", ), append=True):
+    """Add a new CSP url to the csp headers for the given resourcetype.
 
-      If the database connection type isn't locally available, it is retrieved
-      using one of the _Load* methods.
-      """
-      try:
-        return super(SmorgasbordMixin.Connections, self).__getitem__(key)
-      except KeyError:
-        return self.setdefault(key, getattr(self, '_Load%s' % key.title())())
+    resourcetype is any of the CSP resource types as defined in:
+      https://content-security-policy.com/#directive
+      defaults to: default-src
 
-    def _LoadMongo(self):
-      """Returns the PageMaker's MongoDB connection."""
-      return self.pagemaker.mongo
+    urls should be one or more of:
+      https://content-security-policy.com/#source_list
+      default to 'self'
+      string or tuple/list is allowed
 
-    def _LoadRelational(self):
-      """Returns the PageMaker's relational database connection."""
-      return self.pagemaker.connectionPageMaker
+    By default this appends to the already present list of sources for the given
+    resourcetype
 
-  @property
-  def bord(self):
-    """Returns a Smorgasbord of autoloading database connections."""
-    if '__bord' not in self.persistent:
-      from .. import model
-      self.persistent.Set('__bord', model.Smorgasbord(
-          connections=SmorgasbordMixin.Connections(self)))
-    return self.persistent.Get('__bord')
+    """
+    if isinstance(urls, str):
+      urls = [urls, ]
+    else:
+      urls = list(urls) if type(urls) == tuple else urls
+    if resourcetype not in self._csp:
+      self._csp[resourcetype] = []
+    if self._csp[resourcetype] == "'none'" or not append:
+      self._csp[resourcetype] = urls
+      return
+    self._csp[resourcetype].extend(urls)
 
+  def _CSPFromConfig(self, config):
+    """sets the CSP headers from a Dictionary
+    Dict keys should be resourcetypes, values should be lists of urls
+
+    resourcetype is any of the CSP resource types as defined in:
+      https://content-security-policy.com/#directive
+
+    urls are in the form:
+      https://content-security-policy.com/#source_list
+    """
+    self._csp = config
+
+  def _CSPheaders(self):
+    """Adds the constructed CSP header to the request"""
+    csp = '; '.join(["%s %s" % (key, ' '.join(value)) for key, value in self._csp.items()])
+    self.req.AddHeader('Content-Security-Policy', csp)
 
 # ##############################################################################
 # Classes for public use (wildcard import)
 #
-class SqAlchemyPageMaker(SqlAlchemyMixin, BasePageMaker):
-  """The basic PageMaker class, providing MySQL support."""
+class PageMaker(XSRFMixin, BasePageMaker):
+  """The basic PageMaker class, providing XSRF support."""
 
-class PageMaker(MysqlMixin, BasePageMaker):
-  """The basic PageMaker class, providing MySQL support."""
 
 class DebuggingPageMaker(DebuggerMixin, PageMaker):
   """The same basic PageMaker, with added debugging on HTTP 500."""

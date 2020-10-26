@@ -1,4 +1,4 @@
-#!/usr/bin/python2.5
+#!/usr/bin/python
 """SQLTalk MySQL Cursor class."""
 __author__ = 'Elmer de Looff <elmer@underdark.nl>'
 __version__ = '0.13'
@@ -13,7 +13,7 @@ class ReturnObject(tuple):
 
   def __new__(cls, connection, results):
     """Creates the immutable tuple."""
-    return super(ReturnObject, cls).__new__(cls, tuple(results))
+    return super().__new__(cls, tuple(results))
 
   def __init__(self, connection, results):
     """Adds the required attributes."""
@@ -54,10 +54,7 @@ class Cursor(pymysql.cursors.DictCursor):
     # of other escaping things to start working properly.
     #   Refer to MySQLdb.cursor code (~line 151) to see how this works.
     self._LogQuery(query)
-    self.execute(query.strip())
-    result = ReturnObject(self.connection, self.fetchall())
-    self._ProcessWarnings(result)
-    return result
+    return self.connection.Query(query.strip(), self)
 
   def _LogQuery(self, query):
     connection = self.connection
@@ -206,7 +203,8 @@ class Cursor(pymysql.cursors.DictCursor):
     return self._Execute(query)
 
   def Select(self, table, fields=None, conditions=None, order=None,
-             group=None, limit=None, offset=0, escape=True, totalcount=False):
+             group=None, limit=None, offset=0, escape=True, totalcount=False,
+             distinct=False):
     """Select fields from table that match the conditions, ordered and limited.
 
     Arguments:
@@ -232,20 +230,21 @@ class Cursor(pymysql.cursors.DictCursor):
       totalcount: boolean. If this is set to True, queries with a LIMIT applied
                   will have the full number of matching rows on
                   the affected_rows attribute of the resultset.
+      distinct:   bool (optional). Performs a DISTINCT query if set to True.
 
     Returns:
       sqlresult.ResultSet object.
     """
     field_escape = self.connection.EscapeField if escape else lambda x: x
-    result = self._Execute('SELECT %s %s FROM %s WHERE %s %s %s %s' % (
+    result = self._Execute('SELECT %s %s %s FROM %s WHERE %s %s %s %s' % (
         'SQL_CALC_FOUND_ROWS' if totalcount and limit is not None else '',
+        'DISTINCT' if distinct else '',
         self._StringFields(fields, field_escape),
         self._StringTable(table, field_escape),
         self._StringConditions(conditions, field_escape),
         self._StringGroup(group, field_escape),
         self._StringOrder(order, field_escape),
         self._StringLimit(limit, offset)))
-
     if totalcount and limit is not None:
       result.affected = self._Execute('SELECT FOUND_ROWS()')[0][0]
     return result

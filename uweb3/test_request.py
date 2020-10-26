@@ -1,4 +1,5 @@
-#!/usr/bin/python
+#!/usr/bin/python3
+# -*- coding: utf-8 -*-
 """Tests for the request module."""
 
 # Method could be a function
@@ -17,7 +18,7 @@ import unittest
 import urllib
 
 # Unittest target
-import request
+from uweb3 import request
 
 
 class IndexedFieldStorageTest(unittest.TestCase):
@@ -36,7 +37,6 @@ class IndexedFieldStorageTest(unittest.TestCase):
   def testBasicStorage(self):
     """A basic IndexedFieldStorage has the proper key + value pair"""
     ifs = self.CreateFieldStorage('key=value')
-    self.assertTrue(ifs)
     self.assertEqual(ifs.getfirst('key'), 'value')
     self.assertEqual(ifs.getlist('key'), ['value'])
 

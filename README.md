@@ -31,7 +31,7 @@ source env/bin/activate
 python3 setup.py install
 
 # Or you can install in development mode which allows easy modification of the source:
-python3 setup.py develop
+python3 setup.py develop  --user
 
 cd uweb3/scaffold
 
@@ -82,7 +82,7 @@ The default way to create new routes in µWeb3 is to create a folder called rout
 In the routes folder create your pagemaker class of choice, the name doesn't matter as long as it inherits from PageMaker.
 After creating your pagemaker be sure to add the route endpoint to routes list in base/__init__.py.
 
-# New
+# New since v3
 - In uweb3 __init__ a class called HotReload
 - In pagemaker __init__:
   - A classmethod called loadModules that loads all pagemaker modules inheriting from PageMaker class
@@ -96,11 +96,10 @@ After creating your pagemaker be sure to add the route endpoint to routes list i
   - Method called DeleteCookie
   - A if statement that checks string like cookies and raises an error if the size is equal or bigger than 4096 bytes.
   - AddCookie method, edited this and the response class to handle the setting of multiple cookies. Previously setting multiple cookies with the       Set-Cookie header would make the last cookie the only cookie.
-- In pagemaker/new_decorators:
+- In pagemaker/decorators:
   - Loggedin decorator that validates if user is loggedin based on cookie with userid
   - Checkxsrf decorator that checks if the incorrect_xsrf_token flag is set
 - In templatepaser:
   - A function called _TemplateConstructXsrf that generates a hidden input field with the supplied value: {{ xsrf [xsrf_variable]}}
 - In libs/sqltalk
-  - Tried to make sqltalk python3 compatible by removing references to: long, unicode and basestring
   - So far so good but it might crash on functions that I didn't use yet

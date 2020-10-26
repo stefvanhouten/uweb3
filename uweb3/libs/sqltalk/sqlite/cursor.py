@@ -1,23 +1,24 @@
-#!/usr/bin/python2.5
+#!/usr/bin/python3
 """SQLTalk SQLite Cursor class."""
 __author__ = 'Elmer de Looff <elmer@underdark.nl>'
 __version__ = '0.4'
 
 
 # Custom modules
-from ext_libs.libs.sqltalk import sqlresult
+from .. import sqlresult
 
 
 class Cursor(object):
   def __init__(self, connection):
     self.connection = connection
+    self.cursor = connection.cursor()
 
   def Execute(self, query, args=(), many=False):
     try:
       if many:
-        result = self.connection.executemany(query, args)
+        result = self.cursor.executemany(query, args)
       else:
-        result = self.connection.execute(query, args)
+        result = self.cursor.execute(query, args)
     except Exception:
       self.connection.logger.exception('Exception during query execution')
       raise
@@ -70,14 +71,14 @@ class Cursor(object):
     Returns:
       sqlresult.ResultSet object.
     """
-    if isinstance(table, basestring):
+    if isinstance(table, str):
       table = self.connection.EscapeField(table)
     else:
       table = ', '.join(map(self.connection.EscapeField, table))
 
     if fields is None:
       fields = '*'
-    elif isinstance(fields, basestring):
+    elif isinstance(fields, str):
       fields = self.connection.EscapeField(fields)
     else:
       fields = ', '.join(map(self.connection.EscapeField, fields))
@@ -91,7 +92,7 @@ class Cursor(object):
     if order is not None:
       orders = []
       for rule in order:
-        if isinstance(rule, basestring):
+        if isinstance(rule, str):
           orders.append(self.connection.EscapeField(rule))
         else:
           orders.append('%s %s' %

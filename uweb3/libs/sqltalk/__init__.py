@@ -1,11 +1,11 @@
-#!/usr/bin/python2.5
+#!/usr/bin/python3
 """Easy use SQL abstraction module.
 
 Returns a custom QueryResult object that holds
 the result, query, used character set and various other small statistics. The
 QueryResult object also support pivoting and subselects
 
-Currently only implements a MySQL abstraction module with a stripped down
+Currently implements a MySQL and sqlite abstraction module with a stripped down
 version of MySQLdb internally.
 
 example usage:
